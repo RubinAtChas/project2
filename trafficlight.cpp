@@ -3,127 +3,208 @@
 #include <mutex>
 #include <chrono>
 #include <string>
-std::mutex mtx;
+#include <condition_variable>
+#include <ctime>
+#include <cstdlib>
+#include <iomanip>
+#include <atomic>
 
+std::mutex mtx;
+std::condition_variable cv;
+bool pedastrianState = false;
+bool roadState = false;
+bool pedastrianReady = false;
+std::atomic<bool> pedestrianButtonPressed(false);
 enum class Lightstate
 {
     RED,
     YELLOW,
     GREEN
-}; // CREATNG AN ENUM TO MANIPULATE THE STATE OF THE TRAFICLIGHTS, BETWEEN RED, GREEN AND YELLOW.
+};
 
 class TrafficLight
 {
 private:
     Lightstate currentState = Lightstate::RED;
-public:
-   TrafficLight(Lightstate currentState) : currentState(currentState){std::cout << "Object Traffic Light has been constructed";}
-   Lightstate getCurrentState()
-   {
-    return currentState;
-   }
-   void setCurrentState(Lightstate input)
-   {
-        currentState = input;
-   }
 
-   void stateToString(Lightstate state)
+public:
+    // TrafficLight(Lightstate currentState) : currentState(currentState) {}
+
+    Lightstate getCurrentState() { return currentState; }
+
+    void setCurrentState(Lightstate input) { currentState = input; }
+
+    void printRoadState()
     {
-        switch (state)
+        switch (currentState)
         {
         case Lightstate::RED:
-            std::cout << "RED\n";
+            logState("Car traffic light: RED\n");
             break;
         case Lightstate::YELLOW:
-            std::cout << "YELLOW\n";
+            logState( "Car traffic light: YELLOW\n");
             break;
         case Lightstate::GREEN:
-            std::cout << "GREED\n";
+            logState("Car traffic light: GREEN\n");
             break;
         }
     }
-
-    Lightstate trafficController(Lightstate currentState) // STATEMACHINE, Is controlling the state of enum class.
-    {
-        for(int i = 0; i < 3; i++)
-        {
-            // mtx.lock();
-            switch (currentState)
-            {
-            case Lightstate::RED:
-                std::this_thread::sleep_for(std::chrono::seconds(3));
-                currentState = Lightstate::YELLOW;
-                std::cout << "ÄR INNE I CASE RED\n";
-                // stateToString(currentState);
-                break;
-            case Lightstate::YELLOW:
-                std::this_thread::sleep_for(std::chrono::seconds(3));
-                std::cout << "ÄR INNE I CASE GUL\n";
-                currentState = Lightstate::GREEN;
-                // stateToString(currentState);
-                break;
-            case Lightstate::GREEN:
-                std::this_thread::sleep_for(std::chrono::seconds(3));
-                currentState = Lightstate::RED;
-                std::cout << "ÄR INNE I CASE GRÖN\n";
-                // stateToString(currentState);
-                break;
-
-            default:
-                break;
-            }
-        }
-        return currentState;
-
-        // mtx.unlock();
-    } 
+   void logState(const std::string &event)
+{
+    auto now = std::chrono::system_clock::now();
+    auto now_c = std::chrono::system_clock::to_time_t(now);
+    std::cout << "[" << std::put_time(localtime(&now_c), "%T") << "] " << event << std::endl;
+} 
 };
 
-bool activatesPedastrianMenu() // Input for Pedastrain cross walk, if TRUE await green for pedastrians, if false continues to be red
+
+void controlTrafficLights(TrafficLight &carLight)
 {
-    /*
-    
-    switch (expression)
+    while (true)
     {
-    case  constant-expression :
-        break;
+        {
+            std::unique_lock<std::mutex> lock(mtx);
+            carLight.setCurrentState(Lightstate::RED);
+            roadState = true;
+            pedastrianReady = true;
+            carLight.printRoadState();
+            cv.notify_all();
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        {
+            std::unique_lock<std::mutex> lock(mtx);
+            roadState = false;
+            pedastrianReady = false;
+            cv.wait(lock, []
+                    { return !pedastrianState; });
+            carLight.setCurrentState(Lightstate::YELLOW);
+            carLight.printRoadState();
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        {
+            std::unique_lock<std::mutex> lock(mtx);
+
+            carLight.setCurrentState(Lightstate::GREEN);
+            carLight.printRoadState();
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        if (pedestrianButtonPressed.load())
+        {
     
-    default:
-        break;
-    } 
-     */
+        {
+            std::unique_lock<std::mutex> lock(mtx);
+            roadState = false;
+            pedastrianReady = false;
+            cv.wait(lock, []
+                    { return !pedastrianState; });
+            carLight.setCurrentState(Lightstate::YELLOW);
+            carLight.printRoadState();
+        }
+        }
+        
+        pedestrianButtonPressed.store(false);
+         std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
 }
 
-void trafficSyncing()
+void pedestrianLight()
 {
-    Lightstate light1 = Lightstate::RED;
-    Lightstate light2 = Lightstate::RED;
-    Lightstate light3 = Lightstate::GREEN;
-    Lightstate light4 = Lightstate::GREEN;
-    TrafficLight trafficLight1(light1); // begins as red
-    TrafficLight trafficLight2(light2); // begins as red
-    TrafficLight trafficLight3(light3); // begins as green
-    TrafficLight trafficLight4(light4); // begins as green
-    while(true)
+    TrafficLight pedastrianInstance;
+    while (true)
     {
-        if(trafficLight1.getCurrentState() == Lightstate::RED && trafficLight2.getCurrentState() == Lightstate::RED)
+        std::unique_lock<std::mutex> lock(mtx);
+
+        cv.wait(lock, []
+                { return roadState && pedastrianReady; });
+        pedastrianState = true;
+        pedastrianInstance.logState("Pedastrian Light: GREEN\n");
+        lock.unlock();
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        lock.lock();
+        pedastrianState = false;
+        pedastrianInstance.logState("Pedastrian Light: RED\n");
+        cv.notify_all();
+    }
+}
+void pedestrianButton()
+{
+    while (true)
+    {
+        std::cout << "Press 'p' to simulate pedestrian button press: ";
+        char input;
+        std::cin >> input;
+        if (input == 'p')
         {
-            trafficLight1.setCurrentState(trafficLight1.trafficController(trafficLight1.getCurrentState()));
-            trafficLight2.setCurrentState(trafficLight2.trafficController(trafficLight2.getCurrentState()));
-            if(trafficLight1.getCurrentState() == Lightstate::GREEN && trafficLight2.getCurrentState() == Lightstate::GREEN);
-        }
-        else if(trafficLight3.getCurrentState() == Lightstate::RED && trafficLight4.getCurrentState() == Lightstate::RED)
-        {
-            trafficLight3.trafficController(trafficLight3.getCurrentState());
-            trafficLight4.trafficController(trafficLight4.getCurrentState());
+            pedestrianButtonPressed.store(true); // Simulera knapptryckning
+            std::cout << "Pedestrian button pressed!\n";
         }
     }
 }
 
 int main()
-{ 
-    trafficSyncing();
-    // std::thread trafficController1(trafficController);
+{
+    TrafficLight carLight;
 
-    //trafficController1.join();
+    std::thread carTraffic(controlTrafficLights, std::ref(carLight));
+    std::thread pedestrianTraffic(pedestrianLight);
+    std::thread buttomPress(pedestrianButton);
+
+    carTraffic.join();
+    pedestrianTraffic.join();
+    buttomPress.join();
+    return 0;
 }
+
+/*
+void trafficSyncing()
+{
+    Lightstate light1 = Lightstate::RED;
+    Lightstate light2 = Lightstate::RED;
+    Lightstate light3 = Lightstate::RED;
+    Lightstate light4 = Lightstate::RED;
+    TrafficLight trafficLight1(light1); // begins as red
+    TrafficLight trafficLight2(light2); // begins as red
+    TrafficLight trafficLight3(light3); // begins as green
+    TrafficLight trafficLight4(light4); // begins as green
+    bool turn1 = false;
+    while (true)
+    {
+        if (trafficLight1.getCurrentState() == Lightstate::RED && trafficLight2.getCurrentState() == Lightstate::RED && turn1 == false)
+        {
+            std::thread t1([&trafficLight1]() { // wtf is a capture list
+                std::cout << "Hello from the lambda thread 1!" << std::endl;
+                trafficLight1.setCurrentState(trafficLight1.trafficController(trafficLight1.getCurrentState(), 1));
+            });
+            std::thread t2([&trafficLight2]() { // wtf is a capture list
+                std::cout << "Hello from the lambda thread 2!" << std::endl;
+                trafficLight2.setCurrentState(trafficLight2.trafficController(trafficLight2.getCurrentState(), 2));
+            });
+            t1.join();
+            t2.join();
+            turn1 = true;
+            // trafficLight1.setCurrentState(trafficLight1.trafficController(trafficLight1.getCurrentState(), 1));
+            // trafficLight2.setCurrentState(trafficLight2.trafficController(trafficLight2.getCurrentState(), 2));
+            // if(trafficLight1.getCurrentState() == Lightstate::GREEN && trafficLight2.getCurrentState() == Lightstate::GREEN);
+        }
+        if (trafficLight3.getCurrentState() == Lightstate::RED && trafficLight4.getCurrentState() == Lightstate::RED && turn1 == true)
+        {
+            std::thread t1([&trafficLight3]() { // wtf is a capture list
+                std::cout << "Hello from the lambda thread 3!" << std::endl;
+                trafficLight3.setCurrentState(trafficLight3.trafficController(trafficLight3.getCurrentState(), 3));
+            });
+            // trafficLight3.trafficController(trafficLight3.getCurrentState(), 3);
+            std::thread t2([&trafficLight4]() { // wtf is a capture list
+                std::cout << "Hello from the lambda thread 4!" << std::endl;
+                trafficLight4.setCurrentState(trafficLight4.trafficController(trafficLight4.getCurrentState(), 4));
+            });
+            t1.join();
+            t2.join();
+            turn1 = false;
+        }
+    }
+}*/
+
+// trafficSyncing();
+// std::thread trafficController1(trafficController);
+
+// trafficController1.join();
